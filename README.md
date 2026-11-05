@@ -356,6 +356,7 @@ name: Internet
 - [Bluetooth self-heal](https://github.com/SudoManaged/ha-bluetooth-self-heal)
 - [Yealink desk phone call log](https://github.com/SudoManaged/ha-yealink-call-log)
 - [Dehumidifier kit](https://github.com/SudoManaged/ha-dehumidifier-kit)
+- [Daily schedule from several calendars](https://github.com/SudoManaged/ha-daily-schedule)
 
 ## Changelog and license
 
