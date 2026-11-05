@@ -1,0 +1,7 @@
+- id: test_internet_failover_alerts
+  alias: Test internet failover alerts
+  use_blueprint:
+    path: sudomanaged/internet_failover_alerts.yaml
+    input:
+      connection_sensor: sensor.internet_connection
+      notify_action: notify.persistent_notification

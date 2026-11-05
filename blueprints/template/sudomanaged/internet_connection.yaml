@@ -1,0 +1,179 @@
+blueprint:
+  name: Internet connection (main or backup)
+  description: >-
+    Tells you which internet connection your home is using, when you have a main connection and a backup (for
+    example fiber with a Starlink or 4G/5G failover).
+
+
+    It reads a sensor that shows your public IP address (Home Assistant's DNS IP integration gives you one) and
+    compares it with your main connection's address. When your router switches to the backup, the internet sees
+    you at a different address, so the sensor changes from your main connection's name to your backup's name.
+
+
+    State: the connection in use now (unknown until the first address is seen). While the public IP sensor has no
+    address (for example during the switch itself), it keeps the last known connection. Attributes: on_backup,
+    public_ip, since, the "settled" connection (settled, settled_backup, settled_since), which changes only once
+    a connection has been in use for the settle time (the "Internet failover alerts" blueprint uses it), and
+    startup_wait, which is above 0 from a Home Assistant shutdown or start until it has fully started (the
+    settled connection waits for 0).
+  domain: template
+  source_url: https://github.com/SudoManaged/ha-internet-failover/blob/main/blueprints/template/sudomanaged/internet_connection.yaml
+  author: SudoManaged
+  homeassistant:
+    min_version: 2024.11.0
+  input:
+    ip_sensor:
+      name: Public IP sensor
+      description: A sensor whose state is your public IPv4 address, for example `sensor.myip` from the DNS IP integration.
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+    main_addresses:
+      name: Main connection's public address
+      description: >-
+        Your public IP address on the main connection (it matches only that address), or the start of it in
+        whole parts if it changes within a range (`203.0.113` or `203.0.113.` match every 203.0.113.x). Several,
+        separated by commas, are allowed. Every other address counts as the backup.
+      selector:
+        text:
+    main_name:
+      name: Main connection's name
+      default: Main
+      selector:
+        text:
+    backup_name:
+      name: Backup connection's name
+      default: Backup
+      selector:
+        text:
+    settle_minutes:
+      name: Settle time (minutes)
+      description: >-
+        How long a connection must be in use before the "settled" connection (and so the alerts) follows it; it is
+        checked once a minute, so it follows within a minute after that. A switch back within that time changes
+        nothing. 0 follows at once.
+      default: 1
+      selector:
+        number:
+          min: 0
+          max: 30
+          unit_of_measurement: min
+# Singular "trigger:" keeps this working on Home Assistant releases from before template blueprints accepted
+# "triggers:" (2024.11 through 2025.4 reject the plural here). The settings ride on each trigger as trigger
+# variables, which those releases pass to the sensor's templates. The public IP is read when it changes, when
+# Home Assistant starts (the IP sensor usually has its address before this sensor starts listening), when it has
+# fully started (automations are listening by then), when it shuts down, and every minute (so the settled
+# connection follows on time). The ids mark the start, fully started, shutdown and once-a-minute reads.
+trigger:
+  - trigger: state
+    entity_id: !input ip_sensor
+    variables: &settings
+      ip_entity: !input ip_sensor
+      main_addresses: !input main_addresses
+      main_name: !input main_name
+      backup_name: !input backup_name
+      settle: !input settle_minutes
+      # What this moment means, worked out once for all the templates below.
+      ip: "{{ states(ip_entity) }}"
+      valid: "{{ ip is match('^\\d{1,3}(\\.\\d{1,3}){3}$') }}"
+      on_main: >-
+        {%- set ns = namespace(match=false) %}
+        {%- for p in (main_addresses if main_addresses is list else (main_addresses | string).split(',')) %}
+          {%- set p = p | string | trim %}
+          {%- if p and (ip ~ '.').startswith(p if p.endswith('.') else p ~ '.') %}{% set ns.match = true %}{% endif %}
+        {%- endfor %}
+        {{- valid and ns.match }}
+  - trigger: homeassistant
+    event: start
+    id: start
+    variables: *settings
+  - trigger: event
+    event_type: homeassistant_started
+    id: started
+    variables: *settings
+  - trigger: homeassistant
+    event: shutdown
+    id: shutdown
+    variables: *settings
+  - trigger: time_pattern
+    minutes: /1
+    id: minute
+    variables: *settings
+sensor:
+  icon: mdi:wan
+  # Every template below starts from the previous values (this) and repeats the same opening lines:
+  # backup = the connection now; since = when it last switched; the settled connection follows it once it has
+  # been in use for the settle time, at a once-a-minute check. It never changes on the start, fully started or
+  # shutdown reads, nor while startup_wait is above 0: 2 from a shutdown (saved with the state, so it is 2 again
+  # at the next start) and from the start, 0 at the fully started event (automations are listening by then); a
+  # change before that would go unannounced. From 2026.8 Home Assistant fires the start trigger only once fully
+  # started, so there the shutdown read is what covers the start. Each once-a-minute read also counts it down, so
+  # it never stays above 0, and two reads are at least a minute apart: longer than automations take to start.
+  state: >-
+    {%- set known = this.state not in ['unknown', 'unavailable', ''] %}
+    {%- set was = this.attributes.get('on_backup') in [true, 'true', 'True'] %}
+    {%- set backup = (not on_main) if valid else was %}
+    {%- if valid %}{{ backup_name if backup else main_name }}
+    {%- elif known %}{{ this.state }}
+    {%- else %}unknown{% endif %}
+  attributes:
+    on_backup: >-
+      {%- set was = this.attributes.get('on_backup') in [true, 'true', 'True'] %}
+      {{- (not on_main) if valid else was }}
+    public_ip: "{{ ip if valid else this.attributes.get('public_ip') }}"
+    since: >-
+      {%- set a = this.attributes %}
+      {%- set known = this.state not in ['unknown', 'unavailable', ''] %}
+      {%- set was = a.get('on_backup') in [true, 'true', 'True'] %}
+      {%- set backup = (not on_main) if valid else was %}
+      {%- if valid and (not known or was != backup) %}{{ now().isoformat() }}
+      {%- else %}{{ a.get('since') }}{% endif %}
+    settled_backup: >-
+      {%- set a = this.attributes %}
+      {%- set known = this.state not in ['unknown', 'unavailable', ''] %}
+      {%- set was = a.get('on_backup') in [true, 'true', 'True'] %}
+      {%- set backup = (not on_main) if valid else was %}
+      {%- set t = now().isoformat() if valid and (not known or was != backup) else a.get('since') %}
+      {%- set prev = a.get('settled_backup') %}
+      {%- set prev = none if prev is none else prev in [true, 'true', 'True'] %}
+      {%- set go = trigger.id not in ['start', 'started', 'shutdown'] and a.get('startup_wait', 0) | int(0) == 0 %}
+      {%- if not (valid or known) %}{% set s = prev %}
+      {%- elif prev is none %}{% set s = backup %}
+      {%- elif backup != prev and go
+            and as_timestamp(now()) - as_timestamp(t, as_timestamp(now())) >= settle | float * 60 %}{% set s = backup %}
+      {%- else %}{% set s = prev %}{% endif %}
+      {{- s }}
+    settled_since: >-
+      {%- set a = this.attributes %}
+      {%- set known = this.state not in ['unknown', 'unavailable', ''] %}
+      {%- set was = a.get('on_backup') in [true, 'true', 'True'] %}
+      {%- set backup = (not on_main) if valid else was %}
+      {%- set t = now().isoformat() if valid and (not known or was != backup) else a.get('since') %}
+      {%- set prev = a.get('settled_backup') %}
+      {%- set prev = none if prev is none else prev in [true, 'true', 'True'] %}
+      {%- set go = trigger.id not in ['start', 'started', 'shutdown'] and a.get('startup_wait', 0) | int(0) == 0 %}
+      {%- if (valid or known) and (prev is none or (backup != prev and go
+            and as_timestamp(now()) - as_timestamp(t, as_timestamp(now())) >= settle | float * 60)) %}{{ t }}
+      {%- else %}{{ a.get('settled_since') }}{% endif %}
+    settled: >-
+      {%- set a = this.attributes %}
+      {%- set known = this.state not in ['unknown', 'unavailable', ''] %}
+      {%- set was = a.get('on_backup') in [true, 'true', 'True'] %}
+      {%- set backup = (not on_main) if valid else was %}
+      {%- set t = now().isoformat() if valid and (not known or was != backup) else a.get('since') %}
+      {%- set prev = a.get('settled_backup') %}
+      {%- set prev = none if prev is none else prev in [true, 'true', 'True'] %}
+      {%- set go = trigger.id not in ['start', 'started', 'shutdown'] and a.get('startup_wait', 0) | int(0) == 0 %}
+      {%- if not (valid or known) %}{% set s = prev %}
+      {%- elif prev is none %}{% set s = backup %}
+      {%- elif backup != prev and go
+            and as_timestamp(now()) - as_timestamp(t, as_timestamp(now())) >= settle | float * 60 %}{% set s = backup %}
+      {%- else %}{% set s = prev %}{% endif %}
+      {%- if s is none %}{{ none }}{% else %}{{ backup_name if s else main_name }}{% endif %}
+    startup_wait: >-
+      {%- set w = this.attributes.get('startup_wait', 0) | int(0) %}
+      {%- if trigger.id in ['start', 'shutdown'] %}2
+      {%- elif trigger.id == 'started' %}0
+      {%- elif trigger.id == 'minute' %}{{ [w - 1, 0] | max }}
+      {%- else %}{{ w }}{% endif %}

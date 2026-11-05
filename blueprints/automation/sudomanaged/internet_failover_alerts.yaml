@@ -1,0 +1,141 @@
+blueprint:
+  name: Internet failover alerts
+  description: >-
+    Tells you when your home switches to its backup internet connection, and when it is back on the main one,
+    using the sensor from the "Internet connection (main or backup)" blueprint.
+
+
+    It follows the sensor's "settled" connection, which changes only once a connection has been in use for the
+    sensor's settle time, so a switch back and forth sends nothing and (with the return alert on) an "on backup"
+    alert is followed by one "back on main" alert. The alert is sent over the backup connection itself, so it
+    reaches you while the main one is down. With the Home Assistant app options on, the "back on main" message
+    replaces the "on backup" one on your phone.
+  domain: automation
+  source_url: https://github.com/SudoManaged/ha-internet-failover/blob/main/blueprints/automation/sudomanaged/internet_failover_alerts.yaml
+  author: SudoManaged
+  homeassistant:
+    min_version: 2024.11.0
+  input:
+    connection_sensor:
+      name: Internet connection sensor
+      description: The sensor made by the "Internet connection (main or backup)" blueprint.
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+    alert_on_return:
+      name: Also alert when the main connection is back
+      default: true
+      selector:
+        boolean:
+    notify_action:
+      name: Notify action
+      description: >-
+        Where alerts go: a notify action such as `notify.mobile_app_my_phone` (one phone with the Home Assistant
+        app), `notify.notify` (with the app installed: every phone with the app) or a notify group defined in
+        YAML. Notify entities (`notify.send_message`) are not supported.
+      default: notify.notify
+      selector:
+        text:
+    phone_app:
+      name: Home Assistant app options
+      description: >-
+        Send the phone app's options: one tag, so "back on main" replaces "on backup", and high priority so
+        Android delivers it at once. Turn this off if your notify action is not the Home Assistant app.
+      default: true
+      selector:
+        boolean:
+    persistent:
+      name: Also show it inside Home Assistant
+      description: A Home Assistant notification (the bell) while on the backup, dismissed when the main one is back.
+      default: true
+      selector:
+        boolean:
+mode: queued
+max: 10
+triggers:
+  - trigger: state
+    entity_id: !input connection_sensor
+    attribute: settled_backup
+# The states can be missing (the sensor removed or reloaded), so every value is read defensively; only a real
+# switch of the settled connection counts.
+variables:
+  alert_on_return: !input alert_on_return
+  notify_action: !input notify_action
+  phone_app: !input phone_app
+  persistent: !input persistent
+  sensor: "{{ trigger.entity_id }}"
+  now_settled: "{{ trigger.to_state.attributes.get('settled_backup') if trigger.to_state is not none else none }}"
+  was_settled: "{{ trigger.from_state.attributes.get('settled_backup') if trigger.from_state is not none else none }}"
+  real_switch: "{{ now_settled in [true, false] and was_settled in [true, false] and now_settled != was_settled }}"
+  on_backup: "{{ now_settled == true }}"
+  now_name: "{{ trigger.to_state.attributes.get('settled', '') if trigger.to_state is not none else '' }}"
+  was_name: "{{ trigger.from_state.attributes.get('settled', '') if trigger.from_state is not none else '' }}"
+  ip: "{{ (trigger.to_state.attributes.get('public_ip') if trigger.to_state is not none else none) or 'unknown' }}"
+  switched: >-
+    {{ as_timestamp(trigger.to_state.attributes.get('settled_since') if trigger.to_state is not none else none,
+                    as_timestamp(now())) }}
+  started: >-
+    {{ as_timestamp(trigger.from_state.attributes.get('settled_since') if trigger.from_state is not none else none,
+                    as_timestamp(now())) }}
+  at: "{{ switched | timestamp_custom('%-I:%M %p') }}"
+  duration: >-
+    {%- set m = ((switched - started) | int + 30) // 60 %}
+    {%- if m < 1 %}less than a minute
+    {%- elif m < 60 %}{{ m }} min
+    {%- else %}{{ m // 60 }} h {{ m % 60 }} min{% endif %}
+  tag: "internet-failover-{{ sensor | slugify }}"
+  title: "{{ ('Internet on ' ~ now_name) if on_backup else ('Internet back on ' ~ now_name) }}"
+  message: >-
+    {%- if on_backup -%}
+      {{ was_name }} is down: your home switched to {{ now_name }} at {{ at }} (public IP {{ ip }}).
+    {%- else -%}
+      {{ now_name }} has been back since {{ at }} (public IP {{ ip }}), after {{ duration }} on {{ was_name }}.
+    {%- endif %}
+conditions:
+  - condition: template
+    value_template: "{{ real_switch }}"
+actions:
+  - if:
+      - condition: template
+        value_template: "{{ persistent }}"
+    then:
+      - if:
+          - condition: template
+            value_template: "{{ on_backup }}"
+        then:
+          - action: persistent_notification.create
+            data:
+              title: "{{ title }}"
+              message: "{{ message }}"
+              notification_id: "{{ tag }}"
+        else:
+          - action: persistent_notification.dismiss
+            data:
+              notification_id: "{{ tag }}"
+  - if:
+      - condition: template
+        value_template: "{{ on_backup or alert_on_return }}"
+    then:
+      - action: logbook.log
+        data:
+          name: Internet failover
+          message: "{{ title }}: {{ message }}"
+          entity_id: "{{ sensor }}"
+      - if:
+          - condition: template
+            value_template: "{{ phone_app }}"
+        then:
+          - action: "{{ notify_action }}"
+            data:
+              title: "{{ title }}"
+              message: "{{ message }}"
+              data:
+                tag: "{{ tag }}"
+                ttl: 0
+                priority: high
+        else:
+          - action: "{{ notify_action }}"
+            data:
+              title: "{{ title }}"
+              message: "{{ message }}"
